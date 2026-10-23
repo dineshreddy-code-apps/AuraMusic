@@ -213,13 +213,43 @@ object StudioAudioGenerator {
             Uri.fromFile(outFile).toString() to durationMs
         }
 
+    fun ensureLocalSampleFileExists(context: Context, targetFile: File, durationMs: Long): File {
+        if (targetFile.exists() && targetFile.length() > 1024L) return targetFile
+        runCatching {
+            targetFile.parentFile?.let { if (!it.exists()) it.mkdirs() }
+            val matchedStudio = defaultStudioSpecs.find { it.fileName.equals(targetFile.name, ignoreCase = true) }
+            val matchedRec = defaultRecordingSpecs.find { it.fileName.equals(targetFile.name, ignoreCase = true) }
+            when {
+                matchedStudio != null -> writeSynthesizedWav(
+                    file = targetFile,
+                    durationSeconds = matchedStudio.durationSeconds,
+                    frequencies = matchedStudio.chordFrequencies,
+                    tempoBpm = matchedStudio.tempoBpm
+                )
+                matchedRec != null -> writeSynthesizedWav(
+                    file = targetFile,
+                    durationSeconds = matchedRec.durationSeconds,
+                    frequencies = matchedRec.chordFrequencies,
+                    tempoBpm = matchedRec.tempoBpm
+                )
+                else -> writeSynthesizedWav(
+                    file = targetFile,
+                    durationSeconds = (durationMs / 1000L).toInt().coerceIn(8, 25),
+                    frequencies = listOf(220.0, 277.18, 329.63, 440.0),
+                    tempoBpm = 96
+                )
+            }
+        }
+        return targetFile
+    }
+
     private fun writeSynthesizedWav(
         file: File,
         durationSeconds: Int,
         frequencies: List<Double>,
         tempoBpm: Int
     ) {
-        val sampleRate = 22050
+        val sampleRate = 44100
         val totalSamples = sampleRate * durationSeconds
         val numChannels = 1
         val bitsPerSample = 16

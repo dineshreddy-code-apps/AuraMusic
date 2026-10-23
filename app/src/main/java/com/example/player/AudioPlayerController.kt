@@ -2,13 +2,16 @@ package com.example.player
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import com.example.data.SongEntity
+import com.example.data.StudioAudioGenerator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +25,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileInputStream
+import kotlin.math.abs
 
 enum class RepeatMode {
     OFF,
@@ -63,7 +67,7 @@ data class PlaybackState(
     val equalizerEnabled: Boolean = true,
     val selectedPreset: EqualizerPreset = EqualizerPreset.FLAT,
     val customBandGainsDb: List<Float> = EqualizerPreset.FLAT.bandGainsDb,
-    val bassBoostStrength: Int = 250, // 0..1000
+    val bassBoostStrength: Int = 0, // 0..1000
     val savedCustomTunings: List<SavedCustomTuning> = emptyList(),
     val activeCustomTuningId: String? = null,
     val activeCustomTuningName: String? = null,
@@ -80,12 +84,14 @@ class AudioPlayerController private constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val fxPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
-    // Persistent audio session ID shared across MediaPlayer instances so Equalizer & Studio FX never reset on track change
-    private val persistentAudioSessionId: Int = runCatching {
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        audioManager?.generateAudioSessionId()?.takeIf { it > 0 } ?: 0
-    }.getOrDefault(0)
+    private val playbackAudioAttributes: AudioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .build()
+
+    private var audioFocusRequest: AudioFocusRequest? = null
 
     private var userCustomGainsDb: List<Float> = loadPersistedCustomGains()
     private var basePrimaryQueue: List<SongEntity> = emptyList()
@@ -107,9 +113,38 @@ class AudioPlayerController private constructor(
     private var progressJob: Job? = null
     private var sleepTimerJob: Job? = null
 
-    init {
-        if (persistentAudioSessionId > 0) {
-            attachAudioEffects(persistentAudioSessionId)
+    private fun requestMediaAudioFocus() {
+        val am = audioManager ?: return
+        runCatching {
+            if (am.mode != AudioManager.MODE_NORMAL) {
+                am.mode = AudioManager.MODE_NORMAL
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val req = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(playbackAudioAttributes)
+                    .setAcceptsDelayedFocusGain(true)
+                    .setWillPauseWhenDucked(false)
+                    .setOnAudioFocusChangeListener { focusChange ->
+                        when (focusChange) {
+                            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                                runCatching { mediaPlayer?.setVolume(0.35f, 0.35f) }
+                            }
+                            AudioManager.AUDIOFOCUS_GAIN -> {
+                                runCatching { mediaPlayer?.setVolume(1.0f, 1.0f) }
+                            }
+                        }
+                    }
+                    .build()
+                    .also { audioFocusRequest = it }
+                am.requestAudioFocus(req)
+            } else {
+                @Suppress("DEPRECATION")
+                am.requestAudioFocus(
+                    null,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+                )
+            }
         }
     }
 
@@ -131,7 +166,7 @@ class AudioPlayerController private constructor(
             val id = parts[0].trim()
             val name = parts[1].trim()
             val bands = parts[2].split(",").mapNotNull { it.toFloatOrNull()?.coerceIn(-12f, 12f) }
-            val bass = parts[3].toIntOrNull()?.coerceIn(0, 1000) ?: 250
+            val bass = parts[3].toIntOrNull()?.coerceIn(0, 1000) ?: 0
             if (id.isNotEmpty() && name.isNotEmpty() && bands.size == 5) {
                 SavedCustomTuning(
                     id = id,
@@ -159,7 +194,7 @@ class AudioPlayerController private constructor(
         val preset = runCatching { EqualizerPreset.valueOf(presetName) }.getOrDefault(EqualizerPreset.FLAT)
         val savedBands = loadPersistedCustomGains()
         val activeBands = if (preset == EqualizerPreset.CUSTOM) savedBands else preset.bandGainsDb
-        val bassStrength = fxPrefs.getInt(KEY_BASS_STRENGTH, 250).coerceIn(0, 1000)
+        val bassStrength = fxPrefs.getInt(KEY_BASS_STRENGTH, 0).coerceIn(0, 1000)
         val savedTunings = loadPersistedSavedTunings()
         val activeTuningId = fxPrefs.getString(KEY_ACTIVE_CUSTOM_TUNING_ID, null)
         val activeTuning = savedTunings.find { it.id == activeTuningId }
@@ -310,7 +345,73 @@ class AudioPlayerController private constructor(
         startMediaPlayerForSong(song, autoStart = true)
     }
 
-    private fun startMediaPlayerForSong(song: SongEntity, autoStart: Boolean = true) {
+    private fun configureDataSourceWithFallbacks(mp: MediaPlayer, song: SongEntity, parsedUri: Uri): Boolean {
+        val rawUriString = song.uriString.trim()
+        val isLocalFileScheme = parsedUri.scheme.equals("file", ignoreCase = true) || rawUriString.startsWith("/")
+
+        if (isLocalFileScheme) {
+            val path = if (rawUriString.startsWith("/")) rawUriString else parsedUri.path
+            if (!path.isNullOrBlank()) {
+                var localFile = File(path)
+                if ((!localFile.exists() || localFile.length() <= 44L) &&
+                    (song.sourceType == "STUDIO_SAMPLE" || song.sourceType == "RECORDING_SAMPLE")
+                ) {
+                    localFile = StudioAudioGenerator.ensureLocalSampleFileExists(
+                        context = context,
+                        targetFile = localFile,
+                        durationMs = song.durationMs
+                    )
+                }
+                if (localFile.exists() && localFile.length() > 0L) {
+                    val fdSuccess = runCatching {
+                        FileInputStream(localFile).use { fis ->
+                            mp.setDataSource(fis.fd, 0L, localFile.length())
+                        }
+                        true
+                    }.getOrDefault(false)
+                    if (fdSuccess) return true
+
+                    val pathSuccess = runCatching {
+                        mp.setDataSource(localFile.absolutePath)
+                        true
+                    }.getOrDefault(false)
+                    if (pathSuccess) return true
+                }
+            }
+        }
+
+        // Content URI or general URI resolution with multiple fallbacks across OEM devices
+        val afdSuccess = runCatching {
+            context.contentResolver.openAssetFileDescriptor(parsedUri, "r")?.use { afd ->
+                if (afd.declaredLength < 0L) {
+                    mp.setDataSource(afd.fileDescriptor)
+                } else {
+                    mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.declaredLength)
+                }
+                true
+            } ?: false
+        }.getOrDefault(false)
+        if (afdSuccess) return true
+
+        val pfdSuccess = runCatching {
+            context.contentResolver.openFileDescriptor(parsedUri, "r")?.use { pfd ->
+                mp.setDataSource(pfd.fileDescriptor)
+                true
+            } ?: false
+        }.getOrDefault(false)
+        if (pfdSuccess) return true
+
+        return runCatching {
+            mp.setDataSource(context, parsedUri)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun startMediaPlayerForSong(
+        song: SongEntity,
+        autoStart: Boolean = true,
+        skipHardwareEffects: Boolean = false
+    ) {
         releasePlayerOnly()
         isPlayerPrepared = false
         shouldPlayWhenPrepared = autoStart
@@ -335,31 +436,21 @@ class AudioPlayerController private constructor(
 
         try {
             val mp = MediaPlayer()
-            mp.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .build()
-            )
-            if (persistentAudioSessionId > 0) {
-                runCatching { mp.audioSessionId = persistentAudioSessionId }
-            }
-            // Keep CPU awake during background playback
+            mp.setAudioAttributes(playbackAudioAttributes)
             runCatching {
                 mp.setWakeMode(context, PowerManager.PARTIAL_WAKE_LOCK)
             }
 
-            if (parsedUri.scheme == "file" && !parsedUri.path.isNullOrBlank()) {
-                val localFile = File(parsedUri.path!!)
-                FileInputStream(localFile).use { fis ->
-                    mp.setDataSource(fis.fd)
-                }
-            } else {
-                mp.setDataSource(context, parsedUri)
+            val dataSourceConfigured = configureDataSourceWithFallbacks(mp, song, parsedUri)
+            if (!dataSourceConfigured) {
+                runCatching { mp.release() }
+                throw IllegalStateException("Unable to configure audio data source for ${song.uriString}")
             }
 
             mp.setOnPreparedListener { player ->
                 isPlayerPrepared = true
+                runCatching { player.setVolume(1.0f, 1.0f) }
+
                 val realDuration = runCatching { player.duration.toLong() }
                     .getOrNull()
                     ?.takeIf { it > 0L }
@@ -371,12 +462,12 @@ class AudioPlayerController private constructor(
                     pendingSeekPositionMs = null
                 }
 
-                // Re-verify and lock current Equalizer & Studio FX onto the prepared audio session
-                val sessionId = if (persistentAudioSessionId > 0) persistentAudioSessionId else player.audioSessionId
-                attachAudioEffects(sessionId)
-
                 if (shouldPlayWhenPrepared) {
+                    requestMediaAudioFocus()
                     runCatching { player.start() }
+                    if (!skipHardwareEffects) {
+                        attachAudioEffects(player.audioSessionId)
+                    }
                     _state.update {
                         it.copy(
                             isPlaying = true,
@@ -387,6 +478,9 @@ class AudioPlayerController private constructor(
                     startProgressTicker()
                     notifyForegroundService(isPlaying = true)
                 } else {
+                    if (!skipHardwareEffects) {
+                        attachAudioEffects(player.audioSessionId)
+                    }
                     _state.update {
                         it.copy(
                             isPlaying = false,
@@ -405,6 +499,17 @@ class AudioPlayerController private constructor(
 
             mp.setOnErrorListener { _, _, _ ->
                 isPlayerPrepared = false
+                if (!skipHardwareEffects) {
+                    // Retry once without hardware DSP effects if the device's audio HAL rejected effect attachment
+                    scope.launch {
+                        startMediaPlayerForSong(
+                            song = song,
+                            autoStart = shouldPlayWhenPrepared,
+                            skipHardwareEffects = true
+                        )
+                    }
+                    return@setOnErrorListener true
+                }
                 if (shouldPlayWhenPrepared) {
                     _state.update {
                         it.copy(
@@ -443,6 +548,9 @@ class AudioPlayerController private constructor(
     private fun attachAudioEffects(audioSessionId: Int) {
         if (audioSessionId <= 0) return
         val currentState = _state.value
+        val hasActiveEqCurve = currentState.selectedPreset != EqualizerPreset.FLAT ||
+            currentState.customBandGainsDb.any { abs(it) > 0.05f }
+
         runCatching {
             val existingEq = equalizer
             val eqInstance = if (existingEq != null && equalizerSessionId == audioSessionId) {
@@ -452,8 +560,10 @@ class AudioPlayerController private constructor(
                 equalizerSessionId = audioSessionId
                 Equalizer(0, audioSessionId).also { equalizer = it }
             }
-            eqInstance.enabled = currentState.equalizerEnabled
-            applyEqualizerBands(currentState.customBandGainsDb)
+            eqInstance.enabled = currentState.equalizerEnabled && hasActiveEqCurve
+            if (currentState.equalizerEnabled) {
+                applyEqualizerBands(currentState.customBandGainsDb)
+            }
         }
         runCatching {
             val existingBb = bassBoost
@@ -464,8 +574,9 @@ class AudioPlayerController private constructor(
                 bassBoostSessionId = audioSessionId
                 BassBoost(0, audioSessionId).also { bassBoost = it }
             }
-            bbInstance.enabled = currentState.equalizerEnabled
-            if (bbInstance.strengthSupported) {
+            val shouldEnableBass = currentState.equalizerEnabled && currentState.bassBoostStrength > 0
+            bbInstance.enabled = shouldEnableBass
+            if (bbInstance.strengthSupported && shouldEnableBass) {
                 bbInstance.setStrength(currentState.bassBoostStrength.coerceIn(0, 1000).toShort())
             }
         }
@@ -474,6 +585,10 @@ class AudioPlayerController private constructor(
     private fun applyEqualizerBands(gainsDb: List<Float>) {
         val eq = equalizer ?: return
         runCatching {
+            val currentState = _state.value
+            val hasActiveEqCurve = currentState.selectedPreset != EqualizerPreset.FLAT ||
+                gainsDb.any { abs(it) > 0.05f }
+            eq.enabled = currentState.equalizerEnabled && hasActiveEqCurve
             val numBands = eq.numberOfBands.toInt()
             val range = eq.bandLevelRange
             val minMb = range[0].toInt()
@@ -518,7 +633,11 @@ class AudioPlayerController private constructor(
         } else {
             shouldPlayWhenPrepared = true
             if (isPlayerPrepared && mp != null) {
-                runCatching { mp.start() }
+                requestMediaAudioFocus()
+                runCatching {
+                    mp.setVolume(1.0f, 1.0f)
+                    mp.start()
+                }
                 _state.update { it.copy(isPlaying = true) }
                 startProgressTicker()
                 notifyForegroundService(isPlaying = true)
@@ -831,8 +950,6 @@ class AudioPlayerController private constructor(
 
     // Equalizer & Audio FX (Globally locked across all song changes & persisted)
     fun setEqualizerEnabled(enabled: Boolean) {
-        runCatching { equalizer?.enabled = enabled }
-        runCatching { bassBoost?.enabled = enabled }
         _state.update { current ->
             val updatedAmps = computeRealtimeWaveform(
                 songId = current.currentSong?.id ?: 1L,
@@ -846,6 +963,13 @@ class AudioPlayerController private constructor(
                 waveformAmplitudes = updatedAmps
             )
         }
+        val activeSessionId = if (isPlayerPrepared) runCatching { mediaPlayer?.audioSessionId ?: -1 }.getOrDefault(-1) else -1
+        if (activeSessionId > 0) {
+            attachAudioEffects(activeSessionId)
+        } else {
+            runCatching { equalizer?.enabled = enabled }
+            runCatching { bassBoost?.enabled = enabled && _state.value.bassBoostStrength > 0 }
+        }
         persistStudioFxState(enabled = enabled)
     }
 
@@ -855,7 +979,6 @@ class AudioPlayerController private constructor(
         } else {
             preset.bandGainsDb
         }
-        applyEqualizerBands(targetBands)
         val activeTuning = if (preset == EqualizerPreset.CUSTOM) {
             _state.value.savedCustomTunings.find { it.id == _state.value.activeCustomTuningId }
         } else {
@@ -877,6 +1000,12 @@ class AudioPlayerController private constructor(
                 waveformAmplitudes = updatedAmps
             )
         }
+        val activeSessionId = if (isPlayerPrepared) runCatching { mediaPlayer?.audioSessionId ?: -1 }.getOrDefault(-1) else -1
+        if (activeSessionId > 0 && equalizer == null) {
+            attachAudioEffects(activeSessionId)
+        } else {
+            applyEqualizerBands(targetBands)
+        }
         persistStudioFxState(
             preset = preset,
             bands = targetBands,
@@ -889,7 +1018,6 @@ class AudioPlayerController private constructor(
         if (bandIndex !in currentBands.indices) return
         currentBands[bandIndex] = gainDb.coerceIn(-12f, 12f)
         userCustomGainsDb = currentBands.toList()
-        applyEqualizerBands(currentBands)
         _state.update { current ->
             val updatedAmps = computeRealtimeWaveform(
                 songId = current.currentSong?.id ?: 1L,
@@ -904,17 +1032,17 @@ class AudioPlayerController private constructor(
                 waveformAmplitudes = updatedAmps
             )
         }
+        val activeSessionId = if (isPlayerPrepared) runCatching { mediaPlayer?.audioSessionId ?: -1 }.getOrDefault(-1) else -1
+        if (activeSessionId > 0 && equalizer == null) {
+            attachAudioEffects(activeSessionId)
+        } else {
+            applyEqualizerBands(currentBands)
+        }
         persistStudioFxState(preset = EqualizerPreset.CUSTOM, bands = currentBands)
     }
 
     fun updateBassBoost(strength: Int) {
         val clamped = strength.coerceIn(0, 1000)
-        runCatching {
-            val bb = bassBoost
-            if (bb != null && bb.strengthSupported) {
-                bb.setStrength(clamped.toShort())
-            }
-        }
         _state.update { current ->
             val updatedAmps = computeRealtimeWaveform(
                 songId = current.currentSong?.id ?: 1L,
@@ -927,6 +1055,21 @@ class AudioPlayerController private constructor(
                 bassBoostStrength = clamped,
                 waveformAmplitudes = updatedAmps
             )
+        }
+        val activeSessionId = if (isPlayerPrepared) runCatching { mediaPlayer?.audioSessionId ?: -1 }.getOrDefault(-1) else -1
+        if (activeSessionId > 0 && bassBoost == null) {
+            attachAudioEffects(activeSessionId)
+        } else {
+            runCatching {
+                val bb = bassBoost
+                if (bb != null) {
+                    val shouldEnable = _state.value.equalizerEnabled && clamped > 0
+                    bb.enabled = shouldEnable
+                    if (bb.strengthSupported && shouldEnable) {
+                        bb.setStrength(clamped.toShort())
+                    }
+                }
+            }
         }
         persistStudioFxState(bassStrength = clamped)
     }
@@ -957,14 +1100,6 @@ class AudioPlayerController private constructor(
         }
 
         userCustomGainsDb = bandsToSave
-        applyEqualizerBands(bandsToSave)
-        runCatching {
-            val bb = bassBoost
-            if (bb != null && bb.strengthSupported) {
-                bb.setStrength(bassToSave.toShort())
-            }
-        }
-
         _state.update { state ->
             state.copy(
                 selectedPreset = EqualizerPreset.CUSTOM,
@@ -974,6 +1109,10 @@ class AudioPlayerController private constructor(
                 activeCustomTuningId = savedTuning.id,
                 activeCustomTuningName = savedTuning.name
             )
+        }
+        val activeSessionId = if (isPlayerPrepared) runCatching { mediaPlayer?.audioSessionId ?: -1 }.getOrDefault(-1) else -1
+        if (activeSessionId > 0) {
+            attachAudioEffects(activeSessionId)
         }
         persistStudioFxState(
             preset = EqualizerPreset.CUSTOM,
@@ -987,13 +1126,6 @@ class AudioPlayerController private constructor(
 
     fun applySavedCustomTuning(tuning: SavedCustomTuning) {
         userCustomGainsDb = tuning.bandGainsDb
-        applyEqualizerBands(tuning.bandGainsDb)
-        runCatching {
-            val bb = bassBoost
-            if (bb != null && bb.strengthSupported) {
-                bb.setStrength(tuning.bassBoostStrength.coerceIn(0, 1000).toShort())
-            }
-        }
         _state.update { current ->
             val updatedAmps = computeRealtimeWaveform(
                 songId = current.currentSong?.id ?: 1L,
@@ -1010,6 +1142,10 @@ class AudioPlayerController private constructor(
                 activeCustomTuningName = tuning.name,
                 waveformAmplitudes = updatedAmps
             )
+        }
+        val activeSessionId = if (isPlayerPrepared) runCatching { mediaPlayer?.audioSessionId ?: -1 }.getOrDefault(-1) else -1
+        if (activeSessionId > 0) {
+            attachAudioEffects(activeSessionId)
         }
         persistStudioFxState(
             preset = EqualizerPreset.CUSTOM,
@@ -1040,7 +1176,6 @@ class AudioPlayerController private constructor(
     fun resetCustomTuningToFlat() {
         val flatBands = EqualizerPreset.FLAT.bandGainsDb
         userCustomGainsDb = flatBands
-        applyEqualizerBands(flatBands)
         _state.update { current ->
             val updatedAmps = computeRealtimeWaveform(
                 songId = current.currentSong?.id ?: 1L,
@@ -1057,6 +1192,7 @@ class AudioPlayerController private constructor(
                 waveformAmplitudes = updatedAmps
             )
         }
+        applyEqualizerBands(flatBands)
         persistStudioFxState(
             preset = EqualizerPreset.CUSTOM,
             bands = flatBands,
@@ -1213,15 +1349,19 @@ class AudioPlayerController private constructor(
         progressJob?.cancel()
         isPlayerPrepared = false
         shouldPlayWhenPrepared = false
-        // Keep Equalizer and BassBoost alive when bound to persistentAudioSessionId so Studio FX never reset on track change
-        if (persistentAudioSessionId <= 0) {
-            runCatching { equalizer?.release() }
-            equalizer = null
-            equalizerSessionId = -1
-            runCatching { bassBoost?.release() }
-            bassBoost = null
-            bassBoostSessionId = -1
+        runCatching {
+            equalizer?.enabled = false
+            equalizer?.release()
         }
+        equalizer = null
+        equalizerSessionId = -1
+        runCatching {
+            bassBoost?.enabled = false
+            bassBoost?.release()
+        }
+        bassBoost = null
+        bassBoostSessionId = -1
+
         val mp = mediaPlayer
         mediaPlayer = null
         if (mp != null) {

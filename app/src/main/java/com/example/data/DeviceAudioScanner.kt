@@ -584,11 +584,39 @@ object DeviceAudioScanner {
             isMusicFlag = 1
         )
 
+        val resolvedPlayableUriString = runCatching {
+            val importsDir = File(context.filesDir, "audio_imports").apply {
+                if (!exists()) mkdirs()
+            }
+            val ext = fallbackDisplayName.substringAfterLast('.', "mp3")
+                .lowercase(Locale.US)
+                .takeIf { it in SUPPORTED_AUDIO_EXTENSIONS } ?: "mp3"
+            val safeName = fallbackDisplayName
+                .substringBeforeLast(".")
+                .replace(Regex("[^a-zA-Z0-9._ -]"), "_")
+                .take(64)
+                .ifBlank { "imported_track" }
+            val uniqueHash = abs(uri.toString().hashCode())
+            val localCopy = File(importsDir, "${safeName}_$uniqueHash.$ext")
+            if (!localCopy.exists() || localCopy.length() == 0L) {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(localCopy).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+            if (localCopy.exists() && localCopy.length() > 128L) {
+                Uri.fromFile(localCopy).toString()
+            } else {
+                uri.toString()
+            }
+        }.getOrDefault(uri.toString())
+
         return ScannedAudioItem(
             title = title,
             singerName = resolvedRecording?.badgeLabel ?: artist,
             albumName = resolvedRecording?.folderTitle ?: album,
-            uriString = uri.toString(),
+            uriString = resolvedPlayableUriString,
             durationMs = durationMs,
             trackNumber = trackNum,
             colorHex = resolvedRecording?.colorHex ?: colorHex,

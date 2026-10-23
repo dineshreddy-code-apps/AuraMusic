@@ -59,8 +59,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.AlbumFolderEntity
 import com.example.data.RecordingCategory
 import com.example.data.SingerFolderEntity
@@ -126,10 +128,11 @@ fun TrackOrganizationSheet(
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Quick Actions Row
+            // Quick Actions Row (Play Next, Liked, Edit Info, Remove Song from Library)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 ActionTileButton(
                     icon = Icons.AutoMirrored.Filled.PlaylistPlay,
@@ -165,6 +168,17 @@ fun TrackOrganizationSheet(
                     modifier = Modifier
                         .weight(1f)
                         .testTag("sheet_edit_metadata_button")
+                )
+                ActionTileButton(
+                    icon = Icons.Filled.DeleteOutline,
+                    label = "Remove Song from Library",
+                    onClick = {
+                        onDeleteSong()
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("sheet_delete_song_button")
                 )
             }
 
@@ -335,32 +349,6 @@ fun TrackOrganizationSheet(
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(20.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-            Spacer(modifier = Modifier.height(8.dp))
-
-            TextButton(
-                onClick = {
-                    onDeleteSong()
-                    onDismiss()
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("sheet_delete_song_button")
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.DeleteOutline,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = if (song.recordingCategory != null) "Delete Recording from Library" else "Remove Song from Library",
-                    color = MaterialTheme.colorScheme.error,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
         }
     }
 }
@@ -376,23 +364,32 @@ private fun ActionTileButton(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(14.dp),
         modifier = modifier
+            .height(74.dp)
             .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
     ) {
         Column(
-            modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp, horizontal = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = label,
                 tint = MaterialTheme.colorScheme.primary
             )
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(5.dp))
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontSize = 11.sp,
+                    lineHeight = 13.sp
+                ),
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
