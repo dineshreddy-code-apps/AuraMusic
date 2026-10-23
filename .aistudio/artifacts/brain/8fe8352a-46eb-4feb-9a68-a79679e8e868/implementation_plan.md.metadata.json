@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for Aura Music, a minimalist offline mobile music player inspired by Apple Music and Spotify with adaptive light/dark theming, MediaStore scanning, SAF file import, custom Albums and Singers folders, Liked Songs, Up Next queue management, Equalizer presets, and Sleep Timer.",
+  "updatedAt":  "2026-10-21T10:43:33.500012398Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

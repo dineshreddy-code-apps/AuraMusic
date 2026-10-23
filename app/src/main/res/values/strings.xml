@@ -1,0 +1,23 @@
+<resources>
+    <string name="app_name">Aura Music</string>
+    <string name="tab_home">Songs</string>
+    <string name="tab_albums">Albums</string>
+    <string name="tab_singers">Singers</string>
+    <string name="tab_liked">Liked</string>
+    <string name="tab_recordings">Recordings</string>
+    <string name="recordings_title">Recordings</string>
+    <string name="scan_device_storage">Scan Device</string>
+    <string name="import_audio_files">Import Audio</string>
+    <string name="search_placeholder">Search songs, singers, or albums…</string>
+    <string name="play_all">Play All</string>
+    <string name="shuffle">Shuffle</string>
+    <string name="liked_songs_title">Liked Songs</string>
+    <string name="albums_title">Albums</string>
+    <string name="singers_title">Singers</string>
+    <string name="new_album">New Album</string>
+    <string name="new_singer">New Singer</string>
+    <string name="now_playing">Now Playing</string>
+    <string name="up_next_queue">Up Next</string>
+    <string name="equalizer_title">Equalizer &amp; Audio FX</string>
+    <string name="sleep_timer_title">Sleep Timer</string>
+</resources>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+    <!-- Upper geometric A swoosh matching uploaded logo -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M51,14 C54.5,14 57.5,16 59.2,19.8 L70,48 L59.5,33.5 L42.5,63 C41.2,65.2 42.5,67.5 45.2,66.6 L88,50 L21,88 C17,90.2 13,86.2 15.2,82 L45.5,19.5 C47,16 48.8,14 51,14 Z" />
+    <!-- Lower right leg swoosh matching uploaded logo -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,88 L67,70 C72,67.5 76.5,68.8 79.8,73.5 L89,88 L73,88 L70,81 C68,76.8 64.5,76 59,78.2 L34,88 Z" />
+</vector>
